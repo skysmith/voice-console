@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 import os
-import shlex
-import subprocess
-from dataclasses import dataclass
+from pynput import keyboard
 
-from stt import transcribe_from_mic
+from ptt import PushToTalkRecorder
+from stt import transcribe_audio
 from tts import speak
-from openclaw_client import ask_openclaw
+from ollama_client import OllamaChat
 
 
 def load_env(path: str):
@@ -21,57 +20,57 @@ def load_env(path: str):
             os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
 
 
-@dataclass
-class Settings:
-    record_seconds: float
-    whisper_model: str
-    tts_voice: str | None
-    openclaw_cmd_template: str
-
-
-def get_settings() -> Settings:
+def main():
     load_env("config.env")
-    record_seconds = float(os.getenv("RECORD_SECONDS", "4"))
-    whisper_model = os.getenv("WHISPER_MODEL", "small")
+
+    whisper_model = os.getenv("WHISPER_MODEL", "tiny.en")
     tts_voice = os.getenv("TTS_VOICE") or None
-    openclaw_cmd_template = os.getenv("OPENCLAW_CMD_TEMPLATE", 'openclaw chat "{prompt}"')
-    return Settings(
-        record_seconds=record_seconds,
-        whisper_model=whisper_model,
-        tts_voice=tts_voice,
-        openclaw_cmd_template=openclaw_cmd_template,
+
+    chat = OllamaChat(
+        model=os.getenv("OLLAMA_MODEL", "llama3.2:3b"),
+        url=os.getenv("OLLAMA_URL", "http://127.0.0.1:11434/api/chat"),
     )
 
+    recorder = PushToTalkRecorder(sample_rate=16000)
 
-def main():
-    s = get_settings()
+    talking = False
+    talk_key = keyboard.Key.space
 
-    print("\nvoice-openclaw (minimal cli)")
-    print("enter = record → transcribe → ask openclaw → speak reply")
-    print("ctrl+c = quit\n")
-    print(f"record: {s.record_seconds}s | whisper: {s.whisper_model}")
-    print(f"openclaw template: {s.openclaw_cmd_template}\n")
+    def on_press(key):
+        nonlocal talking
+        if key == talk_key and not talking:
+            talking = True
+            print("\n[talk] recording… (hold SPACE)")
+            recorder.start()
 
-    try:
-        while True:
-            input("[enter] talk… ")
-            text = transcribe_from_mic(seconds=s.record_seconds, model_name=s.whisper_model).strip()
+    def on_release(key):
+        nonlocal talking
+        if key == talk_key and talking:
+            talking = False
+            audio = recorder.stop()
+            print("[talk] transcribing…")
+            text = transcribe_audio(audio, model_name=whisper_model)
+
             if not text:
-                print("no transcript.\n")
-                continue
+                print("[talk] no transcript.")
+                return
 
             print(f"\nyou: {text}\n")
+            reply = chat.ask(text).strip()
+            print(f"ollama: {reply}\n")
+            speak(reply, voice=tts_voice)
 
-            reply = ask_openclaw(text, s.openclaw_cmd_template).strip()
-            if not reply:
-                print("openclaw returned no text.\n")
-                continue
+    print("\nvoice-console (ollama ptt)")
+    print("hold SPACE to talk. release to send. ctrl+c to quit.\n")
+    print(f"whisper: {whisper_model} | ollama: {chat.model}\n")
 
-            print(f"openclaw: {reply}\n")
-            speak(reply, voice=s.tts_voice)
+    with keyboard.Listener(on_press=on_press, on_release=on_release) as listener:
+        try:
+            listener.join()
+        except KeyboardInterrupt:
+            pass
 
-    except KeyboardInterrupt:
-        print("\nbye.\n")
+    print("\nbye.\n")
 
 
 if __name__ == "__main__":
